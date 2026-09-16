@@ -14,6 +14,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/tls"
 	"encoding/base64"
@@ -708,6 +709,107 @@ func TestConfigReloadDefaultSentinel(t *testing.T) {
 	}
 	opts = server.getOpts()
 	require_Equal(t, opts.DefaultSentinel, sentinelToken)
+}
+
+// Clients like nats.js send the user nkey in CONNECT alongside the JWT. A reload
+// that changes the preloaded accounts must not treat them as removed nkey users.
+func TestConfigReloadKeepsJWTClientsThatSendNkey(t *testing.T) {
+	preload := make(map[string]string)
+
+	_, sysPub, sysAC := NewJwtAccountClaim("SYS")
+	sysJWT, err := sysAC.Encode(oKp)
+	require_NoError(t, err)
+	preload[sysPub] = sysJWT
+
+	aKP, aPub, aAC := NewJwtAccountClaim("A")
+	aJWT, err := aAC.Encode(oKp)
+	require_NoError(t, err)
+	preload[aPub] = aJWT
+
+	content := func() []byte {
+		preloadConfig, err := json.MarshalIndent(preload, "", " ")
+		require_NoError(t, err)
+		return fmt.Appendf(nil, `
+			listen: 127.0.0.1:-1
+			operator: %s
+			system_account: %s
+			resolver: MEM
+			resolver_preload: %s
+		`, ojwt, sysPub, preloadConfig)
+	}
+
+	server, opts, config := runReloadServerWithContent(t, content())
+	defer server.Shutdown()
+
+	connect := func(sendNkey bool) (net.Conn, *bufio.Reader) {
+		t.Helper()
+		uKP, err := nkeys.CreateUser()
+		require_NoError(t, err)
+		uPub, err := uKP.PublicKey()
+		require_NoError(t, err)
+		uJWT, err := jwt.NewUserClaims(uPub).Encode(aKP)
+		require_NoError(t, err)
+
+		conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", opts.Host, opts.Port))
+		require_NoError(t, err)
+		t.Cleanup(func() { conn.Close() })
+		cr := bufio.NewReader(conn)
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+		line, err := cr.ReadString('\n')
+		require_NoError(t, err)
+		var info nonceInfo
+		require_NoError(t, json.Unmarshal([]byte(line[5:]), &info))
+		sigraw, err := uKP.Sign([]byte(info.Nonce))
+		require_NoError(t, err)
+
+		cs := map[string]any{
+			"jwt":      uJWT,
+			"sig":      base64.RawURLEncoding.EncodeToString(sigraw),
+			"verbose":  false,
+			"pedantic": false,
+		}
+		if sendNkey {
+			cs["nkey"] = uPub
+		}
+		connectJSON, err := json.Marshal(cs)
+		require_NoError(t, err)
+		_, err = fmt.Fprintf(conn, "CONNECT %s\r\nPING\r\n", connectJSON)
+		require_NoError(t, err)
+
+		line, err = cr.ReadString('\n')
+		require_NoError(t, err)
+		require_Equal(t, line, "PONG\r\n")
+		return conn, cr
+	}
+
+	withNkey, withNkeyReader := connect(true)
+	withoutNkey, withoutNkeyReader := connect(false)
+	checkClientsCount(t, server, 2)
+
+	_, bPub, bAC := NewJwtAccountClaim("B")
+	preload[bPub], err = bAC.Encode(oKp)
+	require_NoError(t, err)
+	changeCurrentConfigContentWithNewContent(t, config, content())
+	require_NoError(t, server.Reload())
+
+	for _, tc := range []struct {
+		name string
+		conn net.Conn
+		cr   *bufio.Reader
+	}{
+		{"without nkey", withoutNkey, withoutNkeyReader},
+		{"with nkey", withNkey, withNkeyReader},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.conn.SetReadDeadline(time.Now().Add(time.Second))
+			_, err := fmt.Fprint(tc.conn, "PING\r\n")
+			require_NoError(t, err)
+			line, err := tc.cr.ReadString('\n')
+			require_NoError(t, err)
+			require_Equal(t, line, "PONG\r\n")
+		})
+	}
 }
 
 // Ensure Reload supports single user authentication config changes. Test this
