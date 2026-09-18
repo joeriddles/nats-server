@@ -225,6 +225,38 @@ func TestEnvVariableEmbedded(t *testing.T) {
 	}
 }
 
+func TestEnvVariableEmbeddedOtherSyntax(t *testing.T) {
+	cluster := `
+		cluster {
+			TOKEN: abc
+			authorization {
+				user: user
+				password: $TOKEN
+			}
+			routes = [ "nats://user:${TOKEN}@server.example.com:6222" ]
+		}`
+	ex := map[string]any{
+		"cluster": map[string]any{
+			"TOKEN": "abc",
+			"authorization": map[string]any{
+				"user":     "user",
+				"password": "abc",
+			},
+			"routes": []any{
+				"nats://user:abc@server.example.com:6222",
+			},
+		},
+	}
+
+	m, err := Parse(cluster)
+	if err != nil {
+		t.Fatalf("Received err: %v\n", err)
+	}
+	if !reflect.DeepEqual(m, ex) {
+		t.Fatalf("Not Equal:\nReceived: '%+v'\nExpected: '%+v'\n", m, ex)
+	}
+}
+
 func TestEnvVariableEmbeddedMissing(t *testing.T) {
 	cluster := `
 		cluster {
@@ -237,6 +269,21 @@ func TestEnvVariableEmbeddedMissing(t *testing.T) {
 	_, err := Parse(cluster)
 	if err == nil {
 		t.Fatalf("Expected err not being able to process embedded variable, got none")
+	}
+}
+
+func TestEnvVariableEmbeddedInQuotesMissing(t *testing.T) {
+	cluster := `
+		cluster {
+			routes = [ "nats://user:${TOKEN}@server.example.com:6222" ]
+		}`
+
+	_, err := Parse(cluster)
+	if err == nil {
+		t.Fatalf("Expected err not being able to process embedded variable, got none")
+	}
+	if !strings.HasPrefix(err.Error(), "variable reference") {
+		t.Fatalf("Wanted a variable reference err, got %q\n", err)
 	}
 }
 
