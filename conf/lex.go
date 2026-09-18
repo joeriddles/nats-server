@@ -108,6 +108,9 @@ type lexer struct {
 
 	// ilstart is the start position of the line from the current item.
 	ilstart int
+
+	// inBraceVar is true while an unquoted string is inside a ${...} reference.
+	inBraceVar bool
 }
 
 type item struct {
@@ -894,22 +897,38 @@ func (lx *lexer) isVariable() bool {
 		return false
 	}
 	if lx.input[lx.start] == '$' {
+		if lx.start+1 < len(lx.input) && lx.input[lx.start+1] == '{' {
+			return false
+		}
 		lx.start += 1
 		return true
 	}
 	return false
 }
 
-// Check if the unquoted string is a variable reference with braces
+// Check if the unquoted string is a whole variable reference with braces, ${VAR}.
 func (lx *lexer) isVariableWithBraces() bool {
-	if lx.start >= len(lx.input) {
+	// The shortest reference is ${a}, so we need at least four characters.
+	if lx.pos-lx.start < 4 || lx.pos > len(lx.input) {
 		return false
 	}
-	if len(lx.input) > 3 && lx.input[lx.start:lx.start+2] == "${" {
-		lx.start += 2
-		return true
+	if lx.input[lx.start:lx.start+2] != "${" || lx.input[lx.pos-1] != '}' {
+		return false
 	}
-	return false
+	// The value must hold one reference and nothing else.
+	if strings.ContainsAny(lx.input[lx.start+2:lx.pos-1], "{}") {
+		return false
+	}
+	lx.start += 2
+	return true
+}
+
+// emitVariableWithBraces emits the name inside a ${VAR} reference.
+func (lx *lexer) emitVariableWithBraces() {
+	lx.pos--
+	lx.emit(itemVariable)
+	lx.pos++
+	lx.ignore()
 }
 
 // lexQuotedString consumes the inner contents of a string. It assumes that the
@@ -966,24 +985,23 @@ func lexString(lx *lexer) stateFn {
 	case r == '\\':
 		lx.addCurrentStringPart(1)
 		return lexStringEscape
+	// The brace that closes a ${...} reference is part of the string.
+	case r == mapEnd && lx.inBraceVar:
+		lx.inBraceVar = false
+		return lexString
 	// Termination of non-quoted strings
 	case isNL(r) || r == eof || r == optValTerm ||
 		r == arrayValTerm || r == arrayEnd || r == mapEnd ||
 		isWhitespace(r):
 
 		lx.backup()
+		lx.inBraceVar = false
 		if lx.hasEscapedParts() {
 			lx.emitString()
 		} else if lx.isBool() {
 			lx.emit(itemBool)
 		} else if lx.isVariableWithBraces() {
-			lx.emit(itemVariable)
-
-			// consume the trailing '}'
-			if lx.pos < len(lx.input) && lx.input[lx.pos] == '}' {
-				lx.next()
-				lx.ignore()
-			}
+			lx.emitVariableWithBraces()
 		} else if lx.isVariable() {
 			lx.emit(itemVariable)
 		} else {
@@ -992,10 +1010,14 @@ func lexString(lx *lexer) stateFn {
 		return lx.pop()
 	case r == sqStringEnd:
 		lx.backup()
+		lx.inBraceVar = false
 		lx.emitString()
 		lx.next()
 		lx.ignore()
 		return lx.pop()
+	}
+	if r == '$' && lx.peek() == '{' {
+		lx.inBraceVar = true
 	}
 	return lexString
 }

@@ -288,22 +288,71 @@ func TestEnvVariableEmbeddedInQuotesMissing(t *testing.T) {
 }
 
 func TestEnvVariableEmbeddedOutsideOfQuotes(t *testing.T) {
+	// Braces make the reference explicit, so quotes are not needed.
 	cluster := `
 		cluster {
 			# set the variable token
 			TOKEN: abc
 			authorization {
 				user: user
-				# ok
 				password: ${TOKEN}
 			}
-			# not ok
 			routes = [ nats://user:${TOKEN}@server.example.com:6222 ]
 		}`
+	ex := map[string]any{
+		"cluster": map[string]any{
+			"TOKEN": "abc",
+			"authorization": map[string]any{
+				"user":     "user",
+				"password": "abc",
+			},
+			"routes": []any{
+				"nats://user:abc@server.example.com:6222",
+			},
+		},
+	}
 
-	_, err := Parse(cluster)
-	if err == nil {
-		t.Fatalf("Expected err not being able to process embedded variable, got none")
+	m, err := Parse(cluster)
+	if err != nil {
+		t.Fatalf("Received err: %v\n", err)
+	}
+	if !reflect.DeepEqual(m, ex) {
+		t.Fatalf("Not Equal:\nReceived: '%+v'\nExpected: '%+v'\n", m, ex)
+	}
+}
+
+func TestEnvVariableEmbeddedPositions(t *testing.T) {
+	// A closing brace must not end the value, wherever the reference sits.
+	os.Setenv("TOKEN", "abc")
+	defer os.Unsetenv("TOKEN")
+
+	for _, test := range []struct {
+		name     string
+		conf     string
+		expected any
+	}{
+		{"whole value", "key: ${TOKEN}", "abc"},
+		{"leading", "key: ${TOKEN}-tail", "abc-tail"},
+		{"trailing", "key: head-${TOKEN}", "head-abc"},
+		{"middle", "key: head-${TOKEN}-tail", "head-abc-tail"},
+		{"twice", "key: ${TOKEN}-${TOKEN}", "abc-abc"},
+		{"quoted", `key: "head-${TOKEN}-tail"`, "head-abc-tail"},
+		{"in a map", "m { key: head-${TOKEN}-tail }", map[string]any{"key": "head-abc-tail"}},
+		{"plain syntax stays literal", "key: head-$TOKEN-tail", "head-$TOKEN-tail"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m, err := Parse(test.conf)
+			if err != nil {
+				t.Fatalf("Received err: %v\n", err)
+			}
+			got := m["key"]
+			if got == nil {
+				got = m["m"]
+			}
+			if !reflect.DeepEqual(got, test.expected) {
+				t.Fatalf("Not Equal:\nReceived: '%+v'\nExpected: '%+v'\n", got, test.expected)
+			}
+		})
 	}
 }
 

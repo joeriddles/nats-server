@@ -541,6 +541,16 @@ func TestVariableValues(t *testing.T) {
 	expect(t, lx, expectedItems)
 }
 
+func TestEmbeddedVariableValues(t *testing.T) {
+	expectedItems := []item{
+		{itemKey, "foo", 1, 0},
+		{itemString, "x-${bar}-y", 1, 6},
+		{itemEOF, "", 1, 0},
+	}
+	lx := lex("foo = x-${bar}-y")
+	expect(t, lx, expectedItems)
+}
+
 func TestArrays(t *testing.T) {
 	expectedItems := []item{
 		{itemKey, "foo", 1, 0},

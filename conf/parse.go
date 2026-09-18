@@ -446,7 +446,7 @@ const pkey = "pk"
 const bcryptPrefix = "2a$"
 
 // To match embedded variables.
-var varPat = regexp.MustCompile(`\$\{[^@\s]+\}`)
+var varPat = regexp.MustCompile(`\$\{[^@\s{}]+\}`)
 
 // checkForEmbeddedVariable will check for embedded variables in an itemString.
 // If they are found and we can look them up we will replace them in item, otherwise will error.
